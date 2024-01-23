@@ -28,6 +28,8 @@ p = {
     "bbox_type": "amodal",
     # Folder containing the BOP datasets.
     "datasets_path": config.datasets_path,
+    # Combine all samples in one json file
+    "combine_all": True
 }
 ################################################################################
 
@@ -36,6 +38,7 @@ dataset_name = p["dataset"]
 split = p["dataset_split"]
 split_type = p["dataset_split_type"]
 bbox_type = p["bbox_type"]
+combine_all = p["combine_all"]
 
 dp_split = dataset_params.get_split_params(
     datasets_path, dataset_name, split, split_type=split_type
@@ -59,16 +62,23 @@ INFO = {
     "date_created": datetime.datetime.utcnow().isoformat(" "),
 }
 
-for scene_id in dp_split["scene_ids"]:
-    segmentation_id = 1
+coco_scene_output = {
+    "info": INFO,
+    "licenses": [],
+    "categories": CATEGORIES,
+    "images": [],
+    "annotations": [],
+}
 
-    coco_scene_output = {
-        "info": INFO,
-        "licenses": [],
-        "categories": CATEGORIES,
-        "images": [],
-        "annotations": [],
-    }
+if combine_all:
+    segmentation_id = 1
+    im_id_coco = -1
+
+for scene_id in dp_split["scene_ids"]:
+    if not combine_all:
+        segmentation_id = 1
+        coco_scene_output["images"] = []
+        coco_scene_output["annotations"] = []
 
     # Load info about the GT poses (e.g. visibility) for the current scene.
     scene_gt = inout.load_scene_gt(dp_split["scene_gt_tpath"].format(scene_id=scene_id))
@@ -76,9 +86,15 @@ for scene_id in dp_split["scene_ids"]:
         dp_split["scene_gt_info_tpath"].format(scene_id=scene_id), keys_to_int=True
     )
     # Output coco path
-    coco_gt_path = dp_split["scene_gt_coco_tpath"].format(scene_id=scene_id)
+    if not combine_all:
+        coco_gt_path = dp_split["scene_gt_coco_tpath"].format(scene_id=scene_id)
+    elif combine_all:
+        coco_gt_path = os.path.join(dp_split["split_path"], "split_gt_coco.json")
     if bbox_type == "modal":
-        coco_gt_path = coco_gt_path.replace("scene_gt_coco", "scene_gt_coco_modal")
+        if not combine_all:
+            coco_gt_path = coco_gt_path.replace("scene_gt_coco", "scene_gt_coco_modal")
+        elif combine_all:
+            coco_gt_path = coco_gt_path.replace("split_gt_coco", "split_gt_coco_modal")
     misc.log(
         "Calculating Coco Annotations - dataset: {} ({}, {}), scene: {}".format(
             p["dataset"], p["dataset_split"], p["dataset_split_type"], scene_id
@@ -87,12 +103,17 @@ for scene_id in dp_split["scene_ids"]:
 
     # Go through each view in scene_gt
     for scene_view, inst_list in scene_gt.items():
-        im_id = int(scene_view)
+        if not combine_all:
+            im_id = int(scene_view)
+            im_id_coco = im_id
+        if combine_all:
+            im_id = int(scene_view)
+            im_id_coco += 1
 
         img_path = dp_split["rgb_tpath"].format(scene_id=scene_id, im_id=im_id)
         relative_img_path = os.path.relpath(img_path, os.path.dirname(coco_gt_path))
         image_info = pycoco_utils.create_image_info(
-            im_id, relative_img_path, dp_split["im_size"]
+            im_id_coco, relative_img_path, dp_split["im_size"]
         )
         coco_scene_output["images"].append(image_info)
         gt_info = scene_gt_info[scene_view]
@@ -110,11 +131,11 @@ for scene_id in dp_split["scene_ids"]:
                 scene_id=scene_id, im_id=im_id, gt_id=idx
             )
 
-            binary_inst_mask_visib = inout.load_depth(mask_visib_p).astype(np.bool)
+            binary_inst_mask_visib = inout.load_depth(mask_visib_p).astype(bool)
             if binary_inst_mask_visib.sum() < 1:
                 continue
             if bbox_type == "amodal":
-                binary_inst_mask_full = inout.load_depth(mask_full_p).astype(np.bool)
+                binary_inst_mask_full = inout.load_depth(mask_full_p).astype(bool)
                 if binary_inst_mask_full.sum() < 1:
                     continue
                 bounding_box = pycoco_utils.bbox_from_binary_mask(binary_inst_mask_full)
@@ -129,7 +150,7 @@ for scene_id in dp_split["scene_ids"]:
 
             annotation_info = pycoco_utils.create_annotation_info(
                 segmentation_id,
-                im_id,
+                im_id_coco,
                 category_info,
                 binary_inst_mask_visib,
                 bounding_box,
@@ -142,5 +163,10 @@ for scene_id in dp_split["scene_ids"]:
 
             segmentation_id = segmentation_id + 1
 
+    if not combine_all:
+        with open(coco_gt_path, "w") as output_json_file:
+            json.dump(coco_scene_output, output_json_file)
+
+if combine_all:
     with open(coco_gt_path, "w") as output_json_file:
         json.dump(coco_scene_output, output_json_file)
